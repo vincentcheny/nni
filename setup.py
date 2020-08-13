@@ -43,7 +43,8 @@ setup(
         'colorama',
         'scikit-learn>=0.23.2',
         'pkginfo',
-        'websockets'
+        'websockets',
+        'dragonfly-opt'
     ],
 
     entry_points = {

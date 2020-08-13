@@ -28,15 +28,35 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import logging
-
+from argparse import Namespace
 import ConfigSpace
 import ConfigSpace.hyperparameters
 import ConfigSpace.util
 import numpy as np
+np.random.seed(0)
 import scipy.stats as sps
 import statsmodels.api as sm
 
+import pickle
+from dragonfly.utils.option_handler import get_option_specs, load_options
+from dragonfly import load_config, multiobjective_maximise_functions
+
 logger = logging.getLogger('BOHB_Advisor')
+
+
+def is_pareto_efficient_simple(costs):
+    """
+    Find the pareto-efficient points
+    :param costs: An (n_points, n_costs) array
+    :return: A (n_points, ) boolean array, indicating whether each point is Pareto efficient
+    """
+    is_efficient = np.ones(costs.shape[0], dtype = bool)
+    for i, c in enumerate(costs):
+        if is_efficient[i]:
+            is_efficient[is_efficient] = np.any(costs[is_efficient]<c, axis=1)  # Keep any point with a lower cost
+            is_efficient[i] = True  # And keep self
+    return is_efficient
+
 
 class CG_BOHB:
     def __init__(self, configspace, min_points_in_model=None,
@@ -84,6 +104,7 @@ class CG_BOHB:
 
         hps = self.configspace.get_hyperparameters()
 
+
         self.kde_vartypes = ""
         self.vartypes = []
 
@@ -104,6 +125,9 @@ class CG_BOHB:
         self.losses = dict()
         self.good_config_rankings = dict()
         self.kde_models = dict()
+        self.runtime = dict()
+        self.search_space = dict()
+        self.is_moo = False
 
     def largest_budget_with_model(self):
         if not self.kde_models:
@@ -132,9 +156,11 @@ class CG_BOHB:
         best = np.inf
         best_vector = None
 
+        # print(f"[vincent] self.kde_models.keys():{self.kde_models.keys()}")
         budget = max(self.kde_models.keys())
 
-        l = self.kde_models[budget]['good'].pdf
+        # print(f"[vincent] self.kde_models[budget]['good']:{self.kde_models[budget]['good']}")
+        l = self.kde_models[budget]['good'].pdf # possibility density function
         g = self.kde_models[budget]['bad'].pdf
 
         minimize_me = lambda x: max(1e-32, g(x))/max(l(x), 1e-32)
@@ -199,7 +225,7 @@ class CG_BOHB:
 
         return sample, info_dict
 
-    def get_config(self, budget):
+    def get_config_old(self, budget):
         """Function to sample a new configuration
         This function is called inside BOHB to query a new configuration
 
@@ -220,19 +246,233 @@ class CG_BOHB:
         # If no model is available, sample from prior
         # also mix in a fraction of random configs
         if not self.kde_models.keys() or np.random.rand() < self.random_fraction:
+            logger.debug(np.random.rand())
+            logger.debug(type(self.configspace.get_hyperparameters()))
+            logger.debug(type(self.configspace.get_hyperparameter("BATCH_SIZE")))
+            logger.debug(type(self.configspace.get_hyperparameter("EPSILON")))
+            # logger.debug(self.configspace.get_hyperparameter("EPSILON")._sample(np.random.RandomState(0),1))
+            # logger.debug(self.configspace.get_hyperparameter("EPSILON").get_choices())
+            # logger.debug(self.configspace.get_hyperparameter("EPSILON").choices)
+
             sample = self.configspace.sample_configuration()
             info_dict['model_based_pick'] = False
 
+        
         if sample is None:
             sample, info_dict = self.sample_from_largest_budget(info_dict)
-
+        print(f'[vincent] sample before deactivate: {sample.get_dictionary()}')
+        '''
+        Configuration:
+            batch_size, Value: 128
+            dense_size, Value: 1024
+            epoch, Value: 10
+            filter_num, Value: 48
+            kernel_size, Value: 5
+            learning_rate, Value: 0.05
+            optimizer, Value: 'sgd'
+            weight_decay, Value: 0.0001
+        '''
         sample = ConfigSpace.util.deactivate_inactive_hyperparameters(
             configuration_space=self.configspace,
             configuration=sample.get_dictionary()
         ).get_dictionary()
+        print(f'[vincent] sample after deactivate: {sample}')
+        '''
+        {'batch_size': 128, 'dense_size': 1024, 'epoch': 10, 'filter_num': 48, 'kernel_size': 5, 'learning_rate': 0.05, 'optimizer': 'sgd', 'weight_decay': 0.0001}
+        '''
+        logger.debug('done sampling a new configuration.')
+        sample['TRIAL_BUDGET'] = budget
+
+        # logger.debug(f'[vincent] sample from get_config_old:{sample}')
+        return sample
+    
+    def get_config(self, budget):
+        """Function to sample a new configuration
+        This function is called inside BOHB to query a new configuration
+
+        Parameters:
+        -----------
+        budget: float
+            the budget for which this configuration is scheduled
+
+        Returns
+        -------
+        config
+            return a valid configuration with parameters and budget
+        """
+        if not self.is_moo:
+            return self.get_config_old(budget)
+
+        logger.debug('start sampling a new configuration.')
+        if not self.configs:
+            print(f"[vincent] self.configs is empty! Use a random config instead.")
+            sample = self.configspace.sample_configuration()
+            sample = ConfigSpace.util.deactivate_inactive_hyperparameters(
+                configuration_space=self.configspace,
+                configuration=sample.get_dictionary()
+            ).get_dictionary()
+            sample['TRIAL_BUDGET'] = budget
+            return sample
+        domain_vars = list()
+        for name in self.search_space.keys():
+            if isinstance(self.search_space[name][0], (float, int)):
+                var_type = 'discrete_numeric'
+            else:
+                var_type = 'discrete'
+            domain_var = {'type': var_type, 'items':self.search_space[name]}
+            domain_vars.append(domain_var)
+        points = list()
+        vals = list()
+        true_vals = list()
+        
+        print(f"[vincent] self.configs:{self.configs} budget:{budget}")
+        print(f"{list(self.search_space.keys())}")
+        for conf_array in self.configs[0]:
+            first, second = [], []
+            for i in range(len(conf_array)):
+                item = self.search_space[list(self.search_space.keys())[i]][int(conf_array[i])]
+                if isinstance(item, (float,int)):
+                    second.append(item)
+                else:
+                    first.append(item)
+            points.append([first,second])
+        for idx in range(len(self.losses[0])):
+            vals.append([-self.losses[0][idx], -self.runtime[0][idx]])
+            true_vals.append([-self.losses[0][idx], -self.runtime[0][idx]])
+        
+        print(f"[vincent] len of points:{len(points)}")
+        if len(points) > 10:
+            vals_array = np.array(vals)
+            pareto_index = is_pareto_efficient_simple(vals_array)
+            p_idx = []
+            np_idx = []
+            np_items = []
+            for j in range(len(pareto_index)):
+                if pareto_index[j] == True:
+                    p_idx.append(j)
+                else:
+                    np_idx.append(j)
+                    np_items.append(vals[j])
+            print(f"[vincent] pareto_index:{p_idx}")
+            print(f"[vincent] not pareto_index:{np_idx}")
+
+
+            if len(p_idx) >= 5:
+                tmp_idx = []
+                for j in range(5):
+                    tmp_idx.append(p_idx[j])
+                points = [points[i] for i in tmp_idx]
+                vals = [vals[i] for i in tmp_idx]
+                true_vals = [true_vals[i] for i in tmp_idx]
+            else:
+                num_diff = 5 - len(p_idx)
+                print(f"[vincent] diff num:{num_diff}")
+                print(f"[vincent] search space:{self.search_space}")
+                if self.search_space['PREFERENCE'][0] == "accuracy":
+                    acc_items = [-item[0] for item in np_items]
+                    sort_n_idx = np.argsort(acc_items)
+                    for i in range(num_diff):
+                        p_idx.append(sort_n_idx[i])
+                    print(f"[vincent] final pareto_index:{p_idx}")
+                    points = [points[i] for i in p_idx]
+                    vals = [vals[i] for i in p_idx]
+                    true_vals = [true_vals[i] for i in p_idx]
+                elif self.search_space['PREFERENCE'][0] == "runtime":
+                    time_items = [-item[1] for item in np_items]
+                    sort_n_idx = np.argsort(time_items)
+                    for i in range(num_diff):
+                        p_idx.append(sort_n_idx[i])
+                    print(f"[vincent] final pareto_index:{p_idx}")
+                    points = [points[i] for i in p_idx]
+                    vals = [vals[i] for i in p_idx]
+                    true_vals = [true_vals[i] for i in p_idx]
+
+            # import random
+            # idx_list = random.sample(range(len(points)), 10)
+            # print(f"[vincent] random selections list idx_list:{idx_list}")
+            # points = [points[i] for i in idx_list]
+            # vals = [vals[i] for i in idx_list]
+            # true_vals = [true_vals[i] for i in idx_list]
+
+        ## vals = [[acc,-spent time],[acc,-spent time]]
+        ## load from memory
+        previous_eval = {'qinfos':[]}
+        for i in range(len(points)):
+            tmp = Namespace(point=points[i],val=vals[i],true_val=true_vals[i])
+            previous_eval['qinfos'].append(tmp)
+        p = Namespace(**previous_eval)
+        load_args = [
+                get_option_specs('init_capital', False, 1, 'Path to the json or pb config file. '),
+                get_option_specs('init_capital_frac', False, None,'The fraction of the total capital to be used for initialisation.'),
+                get_option_specs('num_init_evals', False, 1,'The number of evaluations for initialisation. If <0, will use default.'),
+                get_option_specs('prev_evaluations', False, p,'Data for any previous evaluations.')
+        ]
+        options = load_options(load_args)
+        config_params = {'domain': domain_vars}
+        config = load_config(config_params)
+        max_num_evals = 1
+        self.dragonfly_config = None
+        
+        def fake_func(x):
+            if not self.dragonfly_config:
+                self.dragonfly_config = x
+                print(f"[vincent] x is assigned to self.dragonfly_config:{self.dragonfly_config}")
+            return 0
+
+        moo_objectives = [fake_func, fake_func]
+        _, _, _ = multiobjective_maximise_functions(moo_objectives, config.domain,max_num_evals,capital_type='num_evals',config=config,options=options)
+        print(f"[vincent] self.dragonfly_config after dragonfly:{self.dragonfly_config}")
+
+
+        ## load prev from the file
+        # data_to_save = {'points': points,
+        #                 'vals': vals,
+        #                 'true_vals': true_vals}
+        # print(f"[vincent] data_to_save:{data_to_save}")
+        # temp_save_path = './dragonfly.saved'
+        
+        # with open(temp_save_path, 'wb') as save_file_handle:
+        #     pickle.dump(data_to_save, save_file_handle)
+
+        
+        # load_args = [
+        #     get_option_specs('progress_load_from', False, temp_save_path,
+        #     'Load progress (from possibly a previous run) from this file.') 
+        # ]
+        # options = load_options(load_args)
+        # config_params = {'domain': domain_vars}
+        # config = load_config(config_params)
+        # max_num_evals = 1
+        # self.dragonfly_config = None
+
+        # def fake_func(x):
+        #     if not self.dragonfly_config:
+        #         self.dragonfly_config = x
+        #         print(f"[vincent] x is assigned to self.dragonfly_config:{self.dragonfly_config}")
+        #     return 0
+        
+        # moo_objectives = [fake_func, fake_func]
+        # _, _, _ = multiobjective_maximise_functions(moo_objectives, config.domain,max_num_evals,capital_type='num_evals',config=config,options=options)
+        # print(f"[vincent] self.dragonfly_config after dragonfly:{self.dragonfly_config}")
+        # import os
+        # if os.path.exists(temp_save_path):
+        #     os.remove(temp_save_path)
+
+        if not self.dragonfly_config:
+            print(f"[vincent] Get empty config from dragonfly! Use a random config instead.")
+            sample = self.configspace.sample_configuration()
+        else:
+            sample = dict()
+            df_idx = 0
+            for name in self.search_space.keys():
+                sample[name] = self.dragonfly_config[df_idx]
+                df_idx += 1
 
         logger.debug('done sampling a new configuration.')
         sample['TRIAL_BUDGET'] = budget
+
+        print(f'[vincent] sample from get_config:{sample}')
+
         return sample
 
     def impute_conditional_data(self, array):
@@ -258,7 +498,7 @@ class CG_BOHB:
             return_array[i, :] = datum
         return return_array
 
-    def new_result(self, loss, budget, parameters, update_model=True):
+    def new_result_old(self, loss, budget, parameters, update_model=True):
         """
         Function to register finished runs. Every time a run has finished, this function should be called
         to register it with the loss.
@@ -286,6 +526,7 @@ class CG_BOHB:
         if budget not in self.configs.keys():
             self.configs[budget] = []
             self.losses[budget] = []
+            self.runtime[budget] = []
 
         # skip model building if we already have a bigger model
         if max(list(self.kde_models.keys()) + [-np.inf]) > budget:
@@ -293,8 +534,10 @@ class CG_BOHB:
 
         # We want to get a numerical representation of the configuration in the original space
         conf = ConfigSpace.Configuration(self.configspace, parameters)
+        # print(f"[vincent] conf in new_result_old:{conf}")
         self.configs[budget].append(conf.get_array())
         self.losses[budget].append(loss)
+        # self.runtime[budget].append(runtime)
 
         # skip model building:
         # a) if not enough points are available
@@ -308,7 +551,9 @@ class CG_BOHB:
 
         train_configs = np.array(self.configs[budget])
         train_losses = np.array(self.losses[budget])
+        # train_runtime = np.array(self.runtime[budget])
 
+        
         n_good = max(self.min_points_in_model, (self.top_n_percent * train_configs.shape[0])//100)
         n_bad = max(self.min_points_in_model, ((100-self.top_n_percent)*train_configs.shape[0])//100)
 
@@ -338,7 +583,49 @@ class CG_BOHB:
             'good': good_kde,
             'bad' : bad_kde
         }
-
+        logger.debug(f"[vincent] self.kde_models.keys():{self.kde_models.keys()} self.kde_models[budget]:{self.kde_models[budget]}")
         # update probs for the categorical parameters for later sampling
         logger.debug('done building a new model for budget %f based on %i/%i split\nBest loss for this budget:%f\n',
-                     budget, n_good, n_bad, np.min(train_losses))
+                    budget, n_good, n_bad, np.min(train_losses))
+    
+
+    def new_result(self, data, budget, parameters, update_model=True):
+        """
+        Function to register finished runs. Every time a run has finished, this function should be called
+        to register it with the loss.
+
+        Parameters:
+        -----------
+        data: float
+            [accuracy, runtime]
+        budget: float
+            the budget of the parameters
+        parameters: dict
+            the parameters of this trial
+        update_model: bool
+            whether use this parameter to update BP model
+
+        Returns
+        -------
+        None
+        """
+        self.is_moo = True
+        if not self.search_space:
+            for hp in self.configspace.get_hyperparameters():
+                self.search_space[hp.name] = list(hp.choices)
+
+        if data is None:
+            # One could skip crashed results, but we decided
+            # assign a +inf loss and count them as bad configurations
+            data = {'accuracy':0, 'runtime':np.inf}
+
+        if budget not in self.configs.keys():
+            self.configs[budget] = []
+            self.losses[budget] = []
+            self.runtime[budget] = []
+
+        # We want to get a numerical representation of the configuration in the original space
+        conf = ConfigSpace.Configuration(self.configspace, parameters)
+        self.configs[budget].append(conf.get_array())
+        self.losses[budget].append(data['accuracy']) # negative
+        self.runtime[budget].append(data['runtime']) # positive

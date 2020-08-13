@@ -12,7 +12,8 @@ import json_tricks
 from schema import Schema, Optional
 import ConfigSpace as CS
 import ConfigSpace.hyperparameters as CSH
-
+import numpy as np
+np.random.seed(0)
 from nni import ClassArgsValidator
 from nni.protocol import CommandType, send
 from nni.msg_dispatcher_base import MsgDispatcherBase
@@ -25,7 +26,22 @@ logger = logging.getLogger('BOHB_Advisor')
 
 _next_parameter_id = 0
 _KEY = 'TRIAL_BUDGET'
+_PREFERENCE = 'PREFERENCE'
 _epsilon = 1e-6
+
+
+def is_pareto_efficient_simple(costs):
+    """
+    Find the pareto-efficient points
+    :param costs: An (n_points, n_costs) array
+    :return: A (n_points, ) boolean array, indicating whether each point is Pareto efficient
+    """
+    is_efficient = np.ones(costs.shape[0], dtype = bool)
+    for i, c in enumerate(costs):
+        if is_efficient[i]:
+            is_efficient[is_efficient] = np.any(costs[is_efficient]<c, axis=1)  # Keep any point with a lower cost
+            is_efficient[i] = True  # And keep self
+    return is_efficient
 
 
 def create_parameter_id():
@@ -78,11 +94,11 @@ class Bracket:
         total number of Successive Halving iterations
     eta: float
         In each iteration, a complete run of sequential halving is executed. In it,
-		after evaluating each configuration on the same subset size, only a fraction of
-		1/eta of them 'advances' to the next round.
-	max_budget : float
-		The largest budget to consider. Needs to be larger than min_budget!
-		The budgets will be geometrically distributed
+        after evaluating each configuration on the same subset size, only a fraction of
+        1/eta of them 'advances' to the next round.
+    max_budget : float
+        The largest budget to consider. Needs to be larger than min_budget!
+        The budgets will be geometrically distributed
         :math:`a^2 + b^2 = c^2 \\sim \\eta^k` for :math:`k\\in [0, 1, ... , num\\_subsets - 1]`.
     optimize_mode: str
         optimize mode, 'maximize' or 'minimize'
@@ -133,11 +149,37 @@ class Bracket:
         -------
         None
         """
+        ### original version ###
+        # if parameter_id in self.configs_perf[i]:
+        #     if self.configs_perf[i][parameter_id][0] < seq:
+        #         self.configs_perf[i][parameter_id] = [seq, value]
+        # else:
+        #     self.configs_perf[i][parameter_id] = [seq, value]
+
+
+        ## multiobjects version ##
+        if isinstance(value, dict):
+            tmp = []
+            tmp.append(value['accuracy'])
+            tmp.append(value['runtime'])
+            value = tmp
         if parameter_id in self.configs_perf[i]:
             if self.configs_perf[i][parameter_id][0] < seq:
-                self.configs_perf[i][parameter_id] = [seq, value]
+                if isinstance(value, list):
+                    temp = [seq]
+                    for v in value:
+                        temp.append(v)
+                    self.configs_perf[i][parameter_id] = temp
+                else:
+                    self.configs_perf[i][parameter_id] = [seq, value]
         else:
-            self.configs_perf[i][parameter_id] = [seq, value]
+            if isinstance(value, list):
+                temp = [seq]
+                for v in value:
+                    temp.append(v)
+                self.configs_perf[i][parameter_id] = temp
+            else:
+                self.configs_perf[i][parameter_id] = [seq, value]
 
     def inform_trial_end(self, i):
         """If the trial is finished and the corresponding round (i.e., i) has all its trials finished,
@@ -154,11 +196,53 @@ class Bracket:
             If we have generated new trials after this trial end, we will return a new trial parameters.
             Otherwise, we will return None.
         """
+        ### original version ###
+        # global _KEY
+        # self.num_finished_configs[i] += 1
+        # logger.debug('bracket id: %d, round: %d %d, finished: %d, all: %d',
+        #              self.s, self.i, i, self.num_finished_configs[i], self.num_configs_to_run[i])
+        # if self.num_finished_configs[i] >= self.num_configs_to_run[i] and self.no_more_trial is False:
+        #     # choose candidate configs from finished configs to run in the next round
+        #     assert self.i == i + 1
+        #     # finish this bracket
+        #     if self.i > self.s:
+        #         self.no_more_trial = True
+        #         return None
+        #     this_round_perf = self.configs_perf[i]
+        #     if self.optimize_mode is OptimizeMode.Maximize:
+        #         sorted_perf = sorted(this_round_perf.items(
+        #         ), key=lambda kv: kv[1][1], reverse=True)  # reverse
+        #     else:
+        #         sorted_perf = sorted(
+        #             this_round_perf.items(), key=lambda kv: kv[1][1])
+        #     logger.debug(
+        #         'bracket %s next round %s, sorted hyper configs: %s', self.s, self.i, sorted_perf)
+        #     next_n, next_r = self.get_n_r()
+        #     logger.debug('bracket %s next round %s, next_n=%d, next_r=%d',
+        #                  self.s, self.i, next_n, next_r)
+        #     hyper_configs = dict()
+        #     for k in range(next_n):
+        #         params_id = sorted_perf[k][0]
+        #         params = self.hyper_configs[i][params_id]
+        #         params[_KEY] = next_r  # modify r
+        #         # generate new id
+        #         increased_id = params_id.split('_')[-1]
+        #         new_id = create_bracket_parameter_id(
+        #             self.s, self.i, increased_id)
+        #         hyper_configs[new_id] = params
+        #     self._record_hyper_configs(hyper_configs)
+        #     return [[key, value] for key, value in hyper_configs.items()]
+        # return None
+
+
+        ## multiobjects version ##
         global _KEY
+        global _PREFERENCE
         self.num_finished_configs[i] += 1
         logger.debug('bracket id: %d, round: %d %d, finished: %d, all: %d',
                      self.s, self.i, i, self.num_finished_configs[i], self.num_configs_to_run[i])
         if self.num_finished_configs[i] >= self.num_configs_to_run[i] and self.no_more_trial is False:
+            logger.debug('start to choose a new round config based on previous round.................................')
             # choose candidate configs from finished configs to run in the next round
             assert self.i == i + 1
             # finish this bracket
@@ -166,17 +250,91 @@ class Bracket:
                 self.no_more_trial = True
                 return None
             this_round_perf = self.configs_perf[i]
-            if self.optimize_mode is OptimizeMode.Maximize:
-                sorted_perf = sorted(this_round_perf.items(
-                ), key=lambda kv: kv[1][1], reverse=True)  # reverse
-            else:
-                sorted_perf = sorted(
-                    this_round_perf.items(), key=lambda kv: kv[1][1])
-            logger.debug(
-                'bracket %s next round %s, sorted hyper configs: %s', self.s, self.i, sorted_perf)
-            next_n, next_r = self.get_n_r()
-            logger.debug('bracket %s next round %s, next_n=%d, next_r=%d',
-                         self.s, self.i, next_n, next_r)
+            logger.debug(this_round_perf)
+            # logger.debug(this_round_perf.items())
+            # this_round_perf_items = this_round_perf.items()
+            ## this_round_perf format (dict) : {'2_0_0': [9223372036854775807, 0.9580000042915344], '2_0_1': [9223372036854775807, 0.9596999883651733]}
+            ## 'params_id':[seq,value]
+            this_round_perf_list = list(this_round_perf.items())
+            logger.debug(this_round_perf_list)
+            logger.debug(len(this_round_perf_list[0][1]))
+            if len(this_round_perf_list[0][1]) > 2: # mean this is multi object value
+                perf_list = []
+                ## after this nest loop, perf list should be [[acc1,runtime1],[acc2,runtime2]]
+                for key in this_round_perf:
+                    tmp = []
+                    for c in range(1,len(this_round_perf[key])):
+                        if self.optimize_mode is OptimizeMode.Maximize:
+                            tmp.append(-this_round_perf[key][c])
+                        else:
+                            tmp.append(this_round_perf[key][c])
+                    perf_list.append(tmp)
+                logger.debug("performance list is ..................")
+                logger.debug(perf_list)
+
+                perf_array = np.array(perf_list)
+                pareto_dict = dict()
+                not_pareto_dict = dict()
+                pareto_index = is_pareto_efficient_simple(perf_array)
+
+                ## pareto_dict : contrain pareto front , format(dict): {'2_0_0 : [acc,runtime]'}
+                ## not_pareto_dict : contrain not pareto front , format(dict): {'2_0_0 : [acc,runtime]'}
+                for j in range(len(pareto_index)):
+                    trial_id = this_round_perf_list[j][0]
+                    acc_runtime = perf_array[j]
+                    if pareto_index[j] == True:
+                        pareto_dict[trial_id] = acc_runtime
+                    else:
+                        not_pareto_dict[trial_id] = acc_runtime
+                logger.debug("init pareto dict is ..................")
+                logger.debug(pareto_dict)
+                logger.debug("not pareto dict is ..................")
+                logger.debug(not_pareto_dict)
+
+
+                next_n, next_r = self.get_n_r()
+                logger.debug('bracket %s next round %s, next_n=%d, next_r=%d',
+                             self.s, self.i, next_n, next_r)
+
+                logger.debug("init pareto dict len is ..................")
+                logger.debug(len(list(pareto_dict.items())))
+                logger.debug(list(pareto_dict.items()))
+                if len(list(pareto_dict.items())) < next_n:
+                    user_preference = self.hyper_configs[i][list(pareto_dict.items())[0][0]][_PREFERENCE]
+                    diff_num = next_n - len(list(pareto_dict.items()))
+                    if user_preference == 'accuracy':
+                        sorted_not_pareto_items = sorted(not_pareto_dict.items(), key=lambda kv: kv[1][0])
+                        logger.debug('sort by acc')
+                        logger.debug(sorted_not_pareto_items)
+                        for d in range(diff_num):
+                            pareto_dict[sorted_not_pareto_items[d][0]] = sorted_not_pareto_items[d][1]
+                    elif user_preference == 'runtime':
+                        sorted_not_pareto_items = sorted(not_pareto_dict.items(), key=lambda kv: kv[1][1])
+                        logger.debug('sort by runtime')
+                        logger.debug(sorted_not_pareto_items)
+                        for d in range(diff_num):
+                            pareto_dict[sorted_not_pareto_items[d][0]] = sorted_not_pareto_items[d][1]
+                
+                
+                logger.debug("final pareto dict is ..................")
+                logger.debug(pareto_dict)
+                sorted_perf = list(pareto_dict.items())
+
+            else: ## single object value
+                if self.optimize_mode is OptimizeMode.Maximize:
+                    sorted_perf = sorted(this_round_perf.items(
+                    ), key=lambda kv: kv[1][1], reverse=True)  # reverse
+                else:
+                    sorted_perf = sorted(
+                        this_round_perf.items(), key=lambda kv: kv[1][1])
+                logger.debug(
+                    'bracket %s next round %s, sorted hyper configs: %s', self.s, self.i, sorted_perf)
+
+                next_n, next_r = self.get_n_r()
+                logger.debug('bracket %s next round %s, next_n=%d, next_r=%d',
+                             self.s, self.i, next_n, next_r)
+
+
             hyper_configs = dict()
             for k in range(next_n):
                 params_id = sorted_perf[k][0]
@@ -468,7 +626,7 @@ class BOHB(MsgDispatcherBase):
             search space of this experiment
         """
         search_space = data
-        cs = CS.ConfigurationSpace()
+        cs = CS.ConfigurationSpace(seed=0)
         for var in search_space:
             _type = str(search_space[var]["_type"])
             if _type == 'choice':
@@ -571,6 +729,67 @@ class BOHB(MsgDispatcherBase):
         ValueError
             Data type not supported
         """
+        #####  original version  ######
+        # logger.debug('handle report metric data = %s', data)
+        # if 'value' in data:
+        #     data['value'] = json_tricks.loads(data['value'])
+        # if data['type'] == MetricType.REQUEST_PARAMETER:
+        #     assert multi_phase_enabled()
+        #     assert data['trial_job_id'] is not None
+        #     assert data['parameter_index'] is not None
+        #     assert data['trial_job_id'] in self.job_id_para_id_map
+        #     self._handle_trial_end(self.job_id_para_id_map[data['trial_job_id']])
+        #     ret = self._get_one_trial_job()
+        #     if ret is None:
+        #         self.unsatisfied_jobs.append({'trial_job_id': data['trial_job_id'], 'parameter_index': data['parameter_index']})
+        #     else:
+        #         ret['trial_job_id'] = data['trial_job_id']
+        #         ret['parameter_index'] = data['parameter_index']
+        #         # update parameter_id in self.job_id_para_id_map
+        #         self.job_id_para_id_map[data['trial_job_id']] = ret['parameter_id']
+        #         send(CommandType.SendTrialJobParameter, json_tricks.dumps(ret))
+        # else:
+        #     assert 'value' in data
+        #     value = extract_scalar_reward(data['value'])
+        #     if self.optimize_mode is OptimizeMode.Maximize:
+        #         reward = -value
+        #     else:
+        #         reward = value
+        #     assert 'parameter_id' in data
+        #     s, i, _ = data['parameter_id'].split('_')
+        #     logger.debug('bracket id = %s, metrics value = %s, type = %s', s, value, data['type'])
+        #     s = int(s)
+
+        #     # add <trial_job_id, parameter_id> to self.job_id_para_id_map here,
+        #     # because when the first parameter_id is created, trial_job_id is not known yet.
+        #     if data['trial_job_id'] in self.job_id_para_id_map:
+        #         assert self.job_id_para_id_map[data['trial_job_id']] == data['parameter_id']
+        #     else:
+        #         self.job_id_para_id_map[data['trial_job_id']] = data['parameter_id']
+
+        #     assert 'type' in data
+        #     if data['type'] == MetricType.FINAL:
+        #         # and PERIODICAL metric are independent, thus, not comparable.
+        #         assert 'sequence' in data
+        #         self.brackets[s].set_config_perf(
+        #             int(i), data['parameter_id'], sys.maxsize, value)
+        #         self.completed_hyper_configs.append(data)
+
+        #         _parameters = self.parameters[data['parameter_id']]
+        #         _parameters.pop(_KEY)
+        #         # update BO with loss, max_s budget, hyperparameters
+        #         self.cg.new_result(loss=reward, budget=data['sequence'], parameters=_parameters, update_model=True)
+        #     elif data['type'] == MetricType.PERIODICAL:
+        #         self.brackets[s].set_config_perf(
+        #             int(i), data['parameter_id'], data['sequence'], value)
+        #     else:
+        #         raise ValueError(
+        #             'Data type not supported: {}'.format(data['type']))
+
+
+
+
+        ### multiobjects version ####
         logger.debug('handle report metric data = %s', data)
         if 'value' in data:
             data['value'] = json_tricks.loads(data['value'])
@@ -593,7 +812,10 @@ class BOHB(MsgDispatcherBase):
             assert 'value' in data
             value = extract_scalar_reward(data['value'])
             if self.optimize_mode is OptimizeMode.Maximize:
-                reward = -value
+                if isinstance(value, dict):
+                    reward = {key:-value[key] for key in value}
+                else:
+                    reward = -value
             else:
                 reward = value
             assert 'parameter_id' in data
@@ -619,7 +841,10 @@ class BOHB(MsgDispatcherBase):
                 _parameters = self.parameters[data['parameter_id']]
                 _parameters.pop(_KEY)
                 # update BO with loss, max_s budget, hyperparameters
-                self.cg.new_result(loss=reward, budget=data['sequence'], parameters=_parameters, update_model=True)
+                if isinstance(reward, dict):
+                    self.cg.new_result(data=reward, budget=data['sequence'], parameters=_parameters, update_model=True)
+                else:
+                    self.cg.new_result_old(loss=reward, budget=data['sequence'], parameters=_parameters, update_model=True)
             elif data['type'] == MetricType.PERIODICAL:
                 self.brackets[s].set_config_perf(
                     int(i), data['parameter_id'], data['sequence'], value)
@@ -669,8 +894,15 @@ class BOHB(MsgDispatcherBase):
                 _budget = self.max_budget
                 logger.info("Set \"TRIAL_BUDGET\" value to %s (max budget)", self.max_budget)
             if self.optimize_mode is OptimizeMode.Maximize:
-                reward = -_value
+                if isinstance(_value, dict):
+                    reward = {key:-_value[key] for key in _value}
+                else:
+                    reward = -_value
             else:
                 reward = _value
-            self.cg.new_result(loss=reward, budget=_budget, parameters=barely_params, update_model=True)
+            # self.cg.new_result(loss=reward, budget=_budget, parameters=barely_params, update_model=True)
+            if isinstance(reward, dict):
+                self.cg.new_result(data=reward, budget=_budget, parameters=barely_params, update_model=True)
+            else:
+                self.cg.new_result_old(loss=reward, budget=_budget, parameters=barely_params, update_model=True)
         logger.info("Successfully import tuning data to BOHB advisor.")

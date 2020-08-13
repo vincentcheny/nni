@@ -79,7 +79,7 @@ def extract_scalar_reward(value, scalar_key='default'):
         Incorrect final result: the final result should be float/int,
         or a dict which has a key named "default" whose value is float/int.
     """
-    if isinstance(value, (float, int)):
+    if isinstance(value, (float, int)) or isinstance(value, dict) and 'accuracy' in value and len(value) > 1:
         reward = value
     elif isinstance(value, dict) and scalar_key in value and isinstance(value[scalar_key], (float, int)):
         reward = value[scalar_key]
