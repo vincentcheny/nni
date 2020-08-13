@@ -42,10 +42,11 @@ NNI 的模型压缩工具包，提供了最先进的模型压缩算法和策略�
 | [SimulatedAnnealing Pruner](https://nni.readthedocs.io/zh/latest/Compressor/Pruner.html#simulatedannealing-pruner)           | 通过启发式的模拟退火算法进行自动剪枝 [参考论文](https://arxiv.org/abs/1907.03141)                                                                                   |
 | [AutoCompress Pruner](https://nni.readthedocs.io/zh/latest/Compressor/Pruner.html#autocompress-pruner)                       | 通过迭代调用 SimulatedAnnealing Pruner 和 ADMM Pruner 进行自动剪枝 [参考论文](https://arxiv.org/abs/1907.03141)                                                |
 
+You can refer to this [benchmark](https://github.com/microsoft/nni/tree/master/docs/en_US/Benchmark.md) for the performance of these pruners on some benchmark problems.
 
 ### 量化算法
 
-量化算法通过减少表示权重或激活所需的精度位数来压缩原始网络，这可以减少计算和推理时间。
+Quantization algorithms compress the original network by reducing the number of bits required to represent weights or activations, which can reduce the computations and the inference time.
 
 | 名称                                                                                                  | 算法简介                                                                                                                                                                       |
 | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -56,19 +57,19 @@ NNI 的模型压缩工具包，提供了最先进的模型压缩算法和策略�
 
 ## 自动模型压缩
 
-有时，给定的目标压缩率很难通过一次压缩就得到最好的结果。 自动模型压缩算法，通常需要通过对不同层采用不同的稀疏度来探索可压缩的空间。 NNI 提供了这样的算法，来帮助用户在模型中为每一层指定压缩度。 此外，还可利用 NNI 的自动调参功能来自动的压缩模型。 详细文档参考[这里](./AutoCompression.md)。
+Given targeted compression ratio, it is pretty hard to obtain the best compressed ratio in a one shot manner. An automatic model compression algorithm usually need to explore the compression space by compressing different layers with different sparsities. NNI provides such algorithms to free users from specifying sparsity of each layer in a model. Moreover, users could leverage NNI's auto tuning power to automatically compress a model. Detailed document can be found [here](./AutoCompression.md).
 
 ## 模型加速
 
-模型压缩的目的是减少推理延迟和模型大小。 但现有的模型压缩算法主要通过模拟的方法来检查压缩模型性能（如精度）。例如，剪枝算法中使用掩码，而量化算法中量化值仍然是以 32 位浮点数来存储。 只要给出这些算法产生的掩码和量化位，NNI 可真正的加速模型。 模型加速的详细文档参考[这里](./ModelSpeedup.md)。
+The final goal of model compression is to reduce inference latency and model size. However, existing model compression algorithms mainly use simulation to check the performance (e.g., accuracy) of compressed model, for example, using masks for pruning algorithms, and storing quantized values still in float32 for quantization algorithms. Given the output masks and quantization bits produced by those algorithms, NNI can really speed up the model. The detailed tutorial of Model Speedup can be found [here](./ModelSpeedup.md).
 
 ## 压缩工具
 
-压缩工具包括了一些有用的工具，能帮助用户理解并分析要压缩的模型。 例如，可检查每层对剪枝的敏感度。 可很容易的计算模型的 FLOPs 和参数数量。 [点击这里](./CompressionUtils.md)，查看压缩工具的完整列表。
+Compression utilities include some useful tools for users to understand and analyze the model they want to compress. For example, users could check sensitivity of each layer to pruning. Users could easily calculate the FLOPs and parameter size of a model. Please refer to [here](./CompressionUtils.md) for a complete list of compression utilities.
 
 ## 自定义压缩算法
 
-NNI 模型压缩提供了简洁的接口，用于自定义新的压缩算法。 接口的设计理念是，将框架相关的实现细节包装起来，让用户能聚焦于压缩逻辑。 点击[这里](./Framework.md)，查看自定义新压缩算法（包括剪枝和量化算法）的详细教程。
+NNI model compression leaves simple interface for users to customize a new compression algorithm. The design philosophy of the interface is making users focus on the compression logic while hiding framework specific implementation details from users. The detailed tutorial for customizing a new compression algorithm (pruning algorithm or quantization algorithm) can be found [here](./Framework.md).
 
 ## 参考和反馈
 * 在 GitHub 中[提交此功能的 Bug](https://github.com/microsoft/nni/issues/new?template=bug-report.md)；
